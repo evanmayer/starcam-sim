@@ -18,7 +18,7 @@ class InterpolatableTable(object):
 
 
 class Sensor(object):
-    def __init__(self, shape, px_size, dark_current, read_noise, bits, qe_table=None, name=None):
+    def __init__(self, shape, px_size, dark_current, read_noise, bits, qe_table=None, name=None, cost=0):
         self.shape = shape * u.pix
         self.px_size = px_size
         self.dark_current = dark_current
@@ -41,12 +41,14 @@ class Sensor(object):
         else:
             self.name = name
 
+        self.cost = cost
+
     def qe(self, lambd):
         return self.qe_table.interp(lambd)
 
 
 class Lens(object):
-    def __init__(self, focal_length, aperture_diam, tau_table=None, name=None):
+    def __init__(self, focal_length, aperture_diam, tau_table=None, name=None, cost=0):
         self.f = focal_length
         self.d = aperture_diam
 
@@ -64,6 +66,8 @@ class Lens(object):
         else:
             self.name = name
 
+        self.cost = cost
+
     def fwhm(self, lambd):
          return (1.029 * u.rad * lambd.to(u.m) / self.d.to(u.m)).to(u.arcsec)
 
@@ -79,7 +83,7 @@ class Lens(object):
 
 
 class Filter(object):
-    def __init__(self, zero_point_flux, tau_table=None):
+    def __init__(self, zero_point_flux, tau_table=None, cost=0):
         # the flux in W cm^-2 um^-1 of a magnitude 0 star
         self.zero_point_flux = zero_point_flux
         if tau_table is None:
@@ -88,6 +92,8 @@ class Filter(object):
             self.tau_table = InterpolatableTable(x, y)
         else:
             self.tau_table = tau_table
+        
+        self.cost = cost
 
     def tau(self, lambd):
         return self.tau_table.interp(lambd)
@@ -103,6 +109,8 @@ class StarCamera(object):
             self.name = 'SC'
         else:
             self.name = name
+
+        self.cost = sensor.cost + lens.cost + filter.cost
 
         self.fov = 2 * np.arctan(sensor.sensor_size / 2 / lens.f).to(u.deg)
         self.plate_scale = (self.fov / sensor.shape).to(u.arcsec / u.pix)
