@@ -83,7 +83,7 @@ class Lens(object):
 
 
 class Filter(object):
-    def __init__(self, zero_point_flux, tau_table=None, cost=0):
+    def __init__(self, zero_point_flux, tau_table=None, cost=0, name=None):
         # the flux in W cm^-2 um^-1 of a magnitude 0 star
         self.zero_point_flux = zero_point_flux
         if tau_table is None:
@@ -92,8 +92,13 @@ class Filter(object):
             self.tau_table = InterpolatableTable(x, y)
         else:
             self.tau_table = tau_table
-        
+
         self.cost = cost
+
+        if name is None:
+            self.name = ''
+        else:
+            self.name = name
 
     def tau(self, lambd):
         return self.tau_table.interp(lambd)
