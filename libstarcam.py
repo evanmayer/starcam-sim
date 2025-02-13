@@ -1,7 +1,10 @@
 import numpy as np
 from astropy import units as u
 from astropy import constants as c
+import astropy.coordinates as coord
 from astropy.stats import signal_to_noise_oir_ccd
+from astroquery.vizier import Vizier
+from astroquery.xmatch import XMatch
 
 from scipy.interpolate import PchipInterpolator
 
@@ -148,10 +151,81 @@ def get_filter_transmission(lambd, center=650*u.nm, center2=None, width=7*u.nm, 
 def get_sky_brightness(lambd):
     # Alexander 1999, Fig. 4
     # MODTRAN, 35km, 30deg SZA
+    # note: sky brightness may actually go UP past 1200 nm! water, etc.
     plot_lambd = np.array([400, 500, 600, 700, 800, 900, 1000, 1100, 1200]) * u.nm
     plot_val = 1e-5 * np.array([10., 5., 2.2, 1., 0.5, 0.2, 0.1, 0.0, 0.0]) * u.W / u.cm**2 / u.sr / u.um
     interp = PchipInterpolator(plot_lambd, plot_val)
     return interp(lambd) * plot_val.unit
+
+
+def calc_limiting_mag(snr_limit, mags, snrs):
+    snr_table = InterpolatableTable(snrs, mags)
+    return snr_table.interp(snr_limit)
+
+
+def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=1000):
+    query = Vizier(
+        columns=['RAmdeg', 'DEmdeg', 'BTmag', 'VTmag'],
+        column_filters={'VTmag' : f'<{mag_limit}'},
+        row_limit=10000
+    )
+    table = query.query_region(coord, width=width, height=height, catalog='I/259/tyc2')[0]
+    table.sort('VTmag')
+    return table[:nlimit]
+
+
+def get_median_Teff(coord, width, height, match_radius=1*u.arcsec, return_array=False):
+    tycho_stars = get_tycho_stars(coord, width, height, mag_limit=9, nlimit=1000)
+    # Get a list of GAIA Teffs by cross-referencing the given ra/dec
+    gaia_dr3 = 'vizier:I/355/paramp'
+    table = XMatch.query(
+        cat1=tycho_stars,
+        colRA1='RAmdeg',
+        colDec1='DEmdeg',
+        cat2=gaia_dr3,
+        max_distance=match_radius
+    )
+    nonzero = table['Teff'] > 0
+    Teffs = table['Teff'][nonzero]
+    if return_array:
+        return np.median(Teffs) * u.K, Teffs * u.K
+    return np.median(Teffs) * u.K
+
+
+def get_model_sed(lambd, Teff):
+    # it's the Planck function
+    def b(lambd, T):
+        # wien
+        num = 2. * c.h * c.c ** 2.
+        expn = c.h * c.c / (lambd * c.k_B * T)
+        return num / ((lambd ** 5.) * (np.exp(expn) - 1.)) / u.sr
+    sed = b(lambd, Teff).to(u.W / u.cm**2 / u.um / u.sr) * u.sr
+    return sed / sed.max()
+
+
+def get_zero_point_flux(lambd, coord, width, height, filter: Filter):
+    # Bootstrap off of an existing survey zero-point flux:
+    # TYCHO2 V: http://svo2.cab.inta-csic.es/svo/theory/fps/index.php?mode=browse&gname=TYCHO&asttype=
+    # Vega system, non-Bessel calibration
+    # calibration reference: https://ui.adsabs.harvard.edu/abs/1995A&A...304..110G/abstract
+    F0 = (3.99504e-9 * u.erg / u.s / u.cm**2 / u.angstrom).to(u.W / u.cm**2 / u.um)
+    lambd_dat, tau = np.genfromtxt('./TYCHO_TYCHO.V.dat', dtype=float, unpack=True)
+    lambd_dat = (lambd_dat * u.angstrom).to(u.nm)
+    tycho_v = Filter(F0, tau_table=InterpolatableTable(lambd_dat, tau), name='Tycho V')
+
+    # Get median Teff in field
+    Teff = get_median_Teff(coord, width, height)
+    # Get a normalized SED for that Teff
+    sed = get_model_sed(lambd_dat, Teff)
+    # Scale our SED to give the same average flux as Vega over the V filter
+    dl = np.diff(lambd_dat).mean()
+    sed_int = np.trapz(sed * tycho_v.tau(lambd_dat), dx=dl) / np.trapz(tycho_v.tau(lambd_dat), dx=dl)
+    norm = F0 / sed_int
+    rescaled_sed = get_model_sed(lambd, Teff) * norm
+    # The average flux of our new SED in our arbitrary filter is our zero-point flux
+    dl = np.diff(lambd).mean()
+    F0_new = np.trapz(rescaled_sed * filter.tau(lambd), dx=dl) / np.trapz(filter.tau(lambd), dx=dl)
+    return F0_new
 
 
 def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
@@ -172,7 +246,7 @@ def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
     lambd : float
         The wavelength array being integrated over, in meters
     flux
-        The absolute flux of in W / (cm^2 um)
+        The absolute flux in W / (cm^2 um)
     mag_per : float
         The relative flux in magnitudes of the source.
 
@@ -184,7 +258,7 @@ def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
     return (1. / (c.h * c.c)) * A_tel * np.trapz(lambd * eta * tau * flux, dx=lambd.diff().mean())
 
 
-def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, clip_aperture=True):
+def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_area=4):
     '''
     Parameters
     ----------
@@ -194,7 +268,13 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, clip_aperture
         Array of wavelengths to evaluate wavelength-dependent quantities at
     target_mag : float
         magnitude of target in filter for which tel_params['zero_point_flux'] is given
-    starcam: StarCamera 
+    starcam: StarCamera
+    min_aperture_area (optional): int
+        For optics with diffraction-limited resolution finer than the plate scale
+        (undersampled), use this number of pixels as the minimum number of pixels
+        for calculating the sky noise contribution. 4 is the default because a star
+        that falls at the corner of a pixel will have its light spread evenly across a
+        4 pixel area.
 
     Returns
     -------
@@ -230,11 +310,11 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, clip_aperture
 
     aperture_area_px = np.pi * (psf_diam.to(u.arcsec) / plate_scale_arcsec_per_px.to(u.arcsec / u.pix) / 2.)**2
     # print('aperture area px', aperture_area_px)
-    if clip_aperture:
+    if min_aperture_area > 0:
         # the aperture is matched to the greater of the two: PSF or the minimum.
         # if seeing is to be considered, it shall be considered in the psf diameter.
         # min_area_px = 1 # no optics/ice/dust scattering/smearing
-        min_area_px = (2 * u.pix)**2 # closer to that seen in Fort Sumner and Alex+1999
+        min_area_px = min_aperture_area * u.pix**2 # closer to that seen in Fort Sumner and Alex+1999
         aperture_area_px = np.clip(aperture_area_px, min_area_px, None)
         # print('aperture area clipped to', aperture_area_px)
 
