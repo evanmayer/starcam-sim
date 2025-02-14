@@ -1,4 +1,7 @@
+import logging
+logging.basicConfig(level='INFO')
 import numpy as np
+
 from astropy import units as u
 from astropy import constants as c
 import astropy.coordinates as coord
@@ -21,11 +24,12 @@ class InterpolatableTable(object):
 
 
 class Sensor(object):
-    def __init__(self, shape, px_size, dark_current, read_noise, bits, qe_table=None, name=None, cost=0):
+    def __init__(self, shape, px_size, dark_current, read_noise, full_well, bits, qe_table=None, name=None, cost=0):
         self.shape = shape * u.pix
         self.px_size = px_size
         self.dark_current = dark_current
         self.read_noise = read_noise
+        self.full_well = full_well
 
         self.megapixels = self.shape[0] * self.shape[1] / 1e6 / u.pix**2
         self.sensor_size = (self.shape * self.px_size / u.pix).to(u.mm)
@@ -169,6 +173,7 @@ def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=1000):
         column_filters={'VTmag' : f'<{mag_limit}'},
         row_limit=10000
     )
+    logging.info(f'Querying Vizier service... {coord}, {width}x{height}')
     table = query.query_region(coord, width=width, height=height, catalog='I/259/tyc2')[0]
     table.sort('VTmag')
     return table[:nlimit]
@@ -178,6 +183,7 @@ def get_median_Teff(coord, width, height, match_radius=1*u.arcsec, return_array=
     tycho_stars = get_tycho_stars(coord, width, height, mag_limit=9, nlimit=1000)
     # Get a list of GAIA Teffs by cross-referencing the given ra/dec
     gaia_dr3 = 'vizier:I/355/paramp'
+    logging.info(f'Querying xMatch service... {coord}, {width}x{height}, r={match_radius}, {gaia_dr3}')
     table = XMatch.query(
         cat1=tycho_stars,
         colRA1='RAmdeg',
@@ -192,15 +198,20 @@ def get_median_Teff(coord, width, height, match_radius=1*u.arcsec, return_array=
     return np.median(Teffs) * u.K
 
 
-def get_model_sed(lambd, Teff):
-    # it's the Planck function
+def get_model_flux_density(Teff):
+    # returns a blackbody flux density curve, evaluatable over wavelength
     def b(lambd, T):
         # wien
         num = 2. * c.h * c.c ** 2.
         expn = c.h * c.c / (lambd * c.k_B * T)
         return num / ((lambd ** 5.) * (np.exp(expn) - 1.)) / u.sr
-    sed = b(lambd, Teff).to(u.W / u.cm**2 / u.um / u.sr) * u.sr
-    return sed / sed.max()
+    # Because we only care about the shape of the curve, we can arbitrarily
+    # multiply by any angular size we want - we don't know how far away a
+    # given star is, and we don't care because this curve will be returned as
+    # normalized to peak = 1 and later rescaled anyway.
+    model_curve = lambda lambd: (b(lambd, Teff) / b(lambd, Teff).max().value).to(u.W / u.cm**2 / u.um / u.sr) * u.sr
+    # Now do you see why I call all of my wavelength arrays lambd?
+    return model_curve
 
 
 def get_zero_point_flux(lambd, coord, width, height, filter: Filter):
@@ -209,23 +220,50 @@ def get_zero_point_flux(lambd, coord, width, height, filter: Filter):
     # Vega system, non-Bessel calibration
     # calibration reference: https://ui.adsabs.harvard.edu/abs/1995A&A...304..110G/abstract
     F0 = (3.99504e-9 * u.erg / u.s / u.cm**2 / u.angstrom).to(u.W / u.cm**2 / u.um)
+    # F0 actually has units of spectral flux density, so I am assuming F0 is
+    # actually the average spectral flux density, and F0 * \Delta \lambda, the
+    # filter equivalent width, gives the zero-point flux.
     lambd_dat, tau = np.genfromtxt('./TYCHO_TYCHO.V.dat', dtype=float, unpack=True)
     lambd_dat = (lambd_dat * u.angstrom).to(u.nm)
     tycho_v = Filter(F0, tau_table=InterpolatableTable(lambd_dat, tau), name='Tycho V')
 
     # Get median Teff in field
     Teff = get_median_Teff(coord, width, height)
-    # Get a normalized SED for that Teff
-    sed = get_model_sed(lambd_dat, Teff)
-    # Scale our SED to give the same average flux as Vega over the V filter
+    # Get a normalized spectral flux density curve for that Teff
+    model_curve = get_model_flux_density(Teff)(lambd_dat)
+    # Scale our "SED" to give the same average spectral flux density as Vega over the V filter
     dl = np.diff(lambd_dat).mean()
-    sed_int = np.trapz(sed * tycho_v.tau(lambd_dat), dx=dl) / np.trapz(tycho_v.tau(lambd_dat), dx=dl)
-    norm = F0 / sed_int
-    rescaled_sed = get_model_sed(lambd, Teff) * norm
-    # The average flux of our new SED in our arbitrary filter is our zero-point flux
+    avg_I_lambd = np.trapz(model_curve * tycho_v.tau(lambd_dat), dx=dl) / np.trapz(tycho_v.tau(lambd_dat), dx=dl)
+    norm = F0 / avg_I_lambd
+    rescaled_curve = get_model_flux_density(Teff)(lambd) * norm
+    # The average flux density of our new curve in our arbitrary filter is our zero-point flux density
     dl = np.diff(lambd).mean()
-    F0_new = np.trapz(rescaled_sed * filter.tau(lambd), dx=dl) / np.trapz(filter.tau(lambd), dx=dl)
+    F0_new = np.trapz(rescaled_curve * filter.tau(lambd), dx=dl) / np.trapz(filter.tau(lambd), dx=dl)
+
+    # import matplotlib.pyplot as plt
+    # fig, ax = plt.subplots()
+    # ax.plot(lambd_dat, model_curve)
+    # ax.plot(lambd_dat, model_curve * tycho_v.tau(lambd_dat))
+
+    # fig, ax = plt.subplots()
+    # ax.plot(lambd, rescaled_curve)
+    # ax.plot(lambd, rescaled_curve * filter.tau(lambd))
+
     return F0_new
+
+
+def get_equivalent_mag(lambd, ref_mag, ref_filter, new_filter, model_flux_density):
+    # https://adsabs.harvard.edu/full/1996BaltA...5..459S
+    # assume suborbital platform: no atmospheric extinction
+    # assume LOS out of galactic plane: negligible reddening/dust extinction
+    dl = np.diff(lambd).mean()
+    numer = np.trapz(model_flux_density(lambd), new_filter.tau(lambd), dx=dl)
+    denom = np.trapz(model_flux_density(lambd), ref_filter.tau(lambd), dx=dl)
+    const = 2.5 * np.log(
+        np.trapz(new_filter.tau(lambd), dx=dl) / np.trapz(ref_filter.tau(lambd), dx=dl)
+    )
+    new_mag = -2.5 * np.log(numer / denom) + const + ref_mag
+    return new_mag
 
 
 def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
@@ -258,7 +296,7 @@ def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
     return (1. / (c.h * c.c)) * A_tel * np.trapz(lambd * eta * tau * flux, dx=lambd.diff().mean())
 
 
-def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_area=4):
+def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_area=4, return_components=False):
     '''
     Parameters
     ----------
@@ -270,11 +308,12 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
         magnitude of target in filter for which tel_params['zero_point_flux'] is given
     starcam: StarCamera
     min_aperture_area (optional): int
-        For optics with diffraction-limited resolution finer than the plate scale
-        (undersampled), use this number of pixels as the minimum number of pixels
-        for calculating the sky noise contribution. 4 is the default because a star
-        that falls at the corner of a pixel will have its light spread evenly across a
-        4 pixel area.
+        For optics with diffraction-limited resolution finer than the plate
+        scale (undersampled), use this number of pixels as the minimum number
+        of pixels for calculating the sky noise contribution. 4 is the default
+        because a star that falls at the corner of a pixel will have its light
+        spread evenly across a 4 pixel area. This also helps account for
+        possible scattering, motion blur, and defocus.
 
     Returns
     -------
@@ -309,22 +348,46 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
     # fake aperture photometry: all source photons end up inside the aperture
 
     aperture_area_px = np.pi * (psf_diam.to(u.arcsec) / plate_scale_arcsec_per_px.to(u.arcsec / u.pix) / 2.)**2
-    # print('aperture area px', aperture_area_px)
+    logging.debug(f'aperture area px: {aperture_area_px}')
     if min_aperture_area > 0:
         # the aperture is matched to the greater of the two: PSF or the minimum.
         # if seeing is to be considered, it shall be considered in the psf diameter.
-        # min_area_px = 1 # no optics/ice/dust scattering/smearing
         min_area_px = min_aperture_area * u.pix**2 # closer to that seen in Fort Sumner and Alex+1999
         aperture_area_px = np.clip(aperture_area_px, min_area_px, None)
-        # print('aperture area clipped to', aperture_area_px)
+        logging.debug(f'aperture area clipped to {aperture_area_px}')
 
     sky_electrons_per_sec_per_px = sky_electrons_per_sec_per_sq_arcsec * (plate_scale_arcsec_per_px ** 2)
-    
+
+    source_electrons_per_px_per_exposure = source_electrons_per_sec * t / aperture_area_px * u.pix
+    if source_electrons_per_px_per_exposure > starcam.sensor.full_well:
+        logging.warning(
+            f'SOURCE SATURATION: electron count from source mag {target_mag} exceeds sensor full well current, saturated!\n' +
+            f'{source_electrons_per_px_per_exposure:.0f} > {starcam.sensor.full_well:.0f}\n' +
+            f'sensor: {starcam.sensor.name}, lens: {starcam.lens.name}, filter: {starcam.filter.name}'
+        )
+
+    sky_electrons_per_px_per_exposure = sky_electrons_per_sec_per_px * t * u.pix
+    if sky_electrons_per_px_per_exposure > starcam.sensor.full_well:
+        logging.warning(
+            f'SKY SATURATION: electron count from sky exceeds sensor full well current, saturated!\n' +
+            f'{sky_electrons_per_px_per_exposure:.0f} > {starcam.sensor.full_well:.0f}\n' + 
+            f'sensor: {starcam.sensor.name}, lens: {starcam.lens.name}, filter: {starcam.filter.name}'
+        )
+
+    if source_electrons_per_px_per_exposure + sky_electrons_per_px_per_exposure > starcam.sensor.full_well:
+        logging.warning(
+            f'SUM SATURATION: sum of sky and source counts exceeds sensor full well current, saturated!\n' +
+            f'{source_electrons_per_px_per_exposure + sky_electrons_per_px_per_exposure:.0f} > {starcam.sensor.full_well:.0f}\n' + 
+            f'sensor: {starcam.sensor.name}, lens: {starcam.lens.name}, filter: {starcam.filter.name}'
+        )
+
     sky_electrons_per_sec = sky_electrons_per_sec_per_px * aperture_area_px
-    # print('source e-:', source_electrons_per_sec)
-    # print('psf diameter', psf_diam.to(u.arcsec))
-    # print('sky e-/s/px', sky_electrons_per_sec_per_px)
-    # print('sky e-/s', sky_electrons_per_sec)
+
+    logging.debug(f'plate scale: {starcam.plate_scale}')
+    logging.debug(f'psf diameter: {psf_diam.to(u.arcsec)}')
+    logging.debug(f'source e-/s: {source_electrons_per_sec}')
+    logging.debug(f'sky e-/s/px: {sky_electrons_per_sec_per_px}')
+    logging.debug(f'sky e-/s: {sky_electrons_per_sec}')
 
     snr = signal_to_noise_oir_ccd(
         t,
@@ -335,4 +398,6 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
         aperture_area_px.value,
         gain=1 # all values in electrons already
     )
+    if return_components:
+        return snr, (source_electrons_per_sec, sky_electrons_per_sec, aperture_area_px)
     return snr
