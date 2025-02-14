@@ -293,7 +293,7 @@ def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
     float
         Amount of signal in each pixel, in electrons/s
     '''
-    return (1. / (c.h * c.c)) * A_tel * np.trapz(lambd * eta * tau * flux, dx=lambd.diff().mean())
+    return u.electron * (1. / (c.h * c.c)) * A_tel * np.trapz(lambd * eta * tau * flux, dx=lambd.diff().mean())
 
 
 def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_area=4, return_components=False):
@@ -391,8 +391,8 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
 
     snr = signal_to_noise_oir_ccd(
         t,
-        source_electrons_per_sec,
-        sky_electrons_per_sec,
+        source_electrons_per_sec / u.electron, # really wants 1/s
+        sky_electrons_per_sec / u.electron,
         D,
         R,
         aperture_area_px.value,
