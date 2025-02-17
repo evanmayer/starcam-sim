@@ -138,7 +138,7 @@ class StarCamera(object):
 # helpers
 def get_optics_transmission(lambd):
     # optical system total transmission, sans filters
-    return np.ones_like(lambd.value) * 0.98
+    return np.ones_like(lambd.value) * 0.9
 
 
 def get_filter_transmission(lambd, center=650*u.nm, center2=None, width=7*u.nm, max_transmission=0.9):
@@ -167,7 +167,7 @@ def calc_limiting_mag(snr_limit, mags, snrs):
     return snr_table.interp(snr_limit)
 
 
-def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=1000):
+def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=2000):
     query = Vizier(
         columns=['RAmdeg', 'DEmdeg', 'BTmag', 'VTmag'],
         column_filters={'VTmag' : f'<{mag_limit}'},
@@ -180,7 +180,7 @@ def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=1000):
 
 
 def get_median_Teff(coord, width, height, match_radius=1*u.arcsec, return_array=False):
-    tycho_stars = get_tycho_stars(coord, width, height, mag_limit=9, nlimit=1000)
+    tycho_stars = get_tycho_stars(coord, width, height, mag_limit=9, nlimit=2000)
     # Get a list of GAIA Teffs by cross-referencing the given ra/dec
     gaia_dr3 = 'vizier:I/355/paramp'
     logging.info(f'Querying xMatch service... {coord}, {width}x{height}, r={match_radius}, {gaia_dr3}')
