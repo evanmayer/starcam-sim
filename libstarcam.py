@@ -13,10 +13,18 @@ from scipy.interpolate import PchipInterpolator
 
 
 class InterpolatableTable(object):
-    def __init__(self, x, y):
+    def __init__(self, x, y, clamp_edges=False):
         assert x.shape == y.shape
         self.x = x
         self.y = y
+
+        if clamp_edges:
+            # Useful if input filter data might cause interpolation into negative transmissions, for example.
+            # Clamp unknown values to zero.
+            dx = np.diff(x).mean()
+            self.x = np.concatenate([[x[0] - (2 * dx), x[0] - dx], x, [x[-1] + dx, x[-1] + (2 * dx)]])
+            self.y = np.zeros(4 + len(y))
+            self.y[2:-2] = y
 
     def interp(self, x_new):
         pchip_interp = PchipInterpolator(self.x, self.y)
@@ -24,12 +32,13 @@ class InterpolatableTable(object):
 
 
 class Sensor(object):
-    def __init__(self, shape, px_size, dark_current, read_noise, full_well, bits, qe_table=None, name=None, cost=0):
+    def __init__(self, shape, px_size, dark_current, read_noise, full_well, bits, gain_adu_per_e=1./u.electron, qe_table=None, name=None, cost=0):
         self.shape = shape * u.pix
         self.px_size = px_size
         self.dark_current = dark_current
         self.read_noise = read_noise
         self.full_well = full_well
+        self.gain_adu_per_e = gain_adu_per_e
 
         self.megapixels = self.shape[0] * self.shape[1] / 1e6 / u.pix**2
         self.sensor_size = (self.shape * self.px_size / u.pix).to(u.mm)
@@ -152,14 +161,17 @@ def get_filter_transmission(lambd, center=650*u.nm, center2=None, width=7*u.nm, 
         return cut0 * cut1 / (np.max(cut0*cut1))
 
 
-def get_sky_brightness(lambd):
+def get_sky_brightness(lambd, scale_factor=0.263):
+    # A scale factor of 0.263 is required to match the ADUs measured by SC2 in
+    # the Fort Sumner test flight with the predictions of the SC2 hardware
+    # model.
     # Alexander 1999, Fig. 4
     # MODTRAN, 35km, 30deg SZA
     # note: sky brightness may actually go UP past 1200 nm! water, etc.
     plot_lambd = np.array([400, 500, 600, 700, 800, 900, 1000, 1100, 1200]) * u.nm
     plot_val = 1e-5 * np.array([10., 5., 2.2, 1., 0.5, 0.2, 0.1, 0.0, 0.0]) * u.W / u.cm**2 / u.sr / u.um
     interp = PchipInterpolator(plot_lambd, plot_val)
-    return interp(lambd) * plot_val.unit
+    return scale_factor * interp(lambd) * plot_val.unit
 
 
 def calc_limiting_mag(snr_limit, mags, snrs):
@@ -171,7 +183,8 @@ def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=2000):
     query = Vizier(
         columns=['RAmdeg', 'DEmdeg', 'BTmag', 'VTmag'],
         column_filters={'VTmag' : f'<{mag_limit}'},
-        row_limit=10000
+        row_limit=10000,
+        timeout=120,
     )
     logging.info(f'Querying Vizier service... {coord}, {width}x{height}')
     table = query.query_region(coord, width=width, height=height, catalog='I/259/tyc2')[0]
@@ -198,7 +211,7 @@ def get_median_Teff(coord, width, height, match_radius=1*u.arcsec, return_array=
     return np.median(Teffs) * u.K
 
 
-def get_model_flux_density(Teff):
+def get_model_flux_density(Teff, norm=True):
     # returns a blackbody flux density curve, evaluatable over wavelength
     def b(lambd, T):
         # wien
@@ -209,12 +222,16 @@ def get_model_flux_density(Teff):
     # multiply by any angular size we want - we don't know how far away a
     # given star is, and we don't care because this curve will be returned as
     # normalized to peak = 1 and later rescaled anyway.
-    model_curve = lambda lambd: (b(lambd, Teff) / b(lambd, Teff).max().value).to(u.W / u.cm**2 / u.um / u.sr) * u.sr
+    res = lambda lambd: b(lambd, Teff).to(u.W / u.cm**2 / u.um / u.sr)
+    if norm:
+        model_curve = lambda lambd: (res(lambd) / np.nanmax(res(lambd)).value) * u.sr
+    else:
+        model_curve = lambda lambd: (res(lambd)) * u.sr
     # Now do you see why I call all of my wavelength arrays lambd?
     return model_curve
 
 
-def get_zero_point_flux(lambd, coord, width, height, filter: Filter):
+def get_zero_point_flux(lambd, filter: Filter):
     # Bootstrap off of an existing survey zero-point flux:
     # TYCHO2 V: http://svo2.cab.inta-csic.es/svo/theory/fps/index.php?mode=browse&gname=TYCHO&asttype=
     # Vega system, non-Bessel calibration
@@ -225,19 +242,22 @@ def get_zero_point_flux(lambd, coord, width, height, filter: Filter):
     # filter equivalent width, gives the zero-point flux.
     lambd_dat, tau = np.genfromtxt('./TYCHO_TYCHO.V.dat', dtype=float, unpack=True)
     lambd_dat = (lambd_dat * u.angstrom).to(u.nm)
-    tycho_v = Filter(F0, tau_table=InterpolatableTable(lambd_dat, tau), name='Tycho V')
+    tycho_v = Filter(F0, tau_table=InterpolatableTable(lambd_dat, tau, clamp_edges=True), name='Tycho V')
 
-    # Get median Teff in field
-    Teff = get_median_Teff(coord, width, height)
+    # The zero point flux depends on the spectrum of the reference star, Vega, T_eff=9490K
+    # avg of polar and equatorial temps, https://en.wikipedia.org/wiki/Vega
+    # # Get median Teff in field
+    # Teff = get_median_Teff(coord, width, height)
+    Teff = 9400 * u.K # this is the BB temp needed to get the Tycho V Vega zero-point flux.
+    # Why is this not anywhere close to the Vega spectrum?
     # Get a normalized spectral flux density curve for that Teff
-    model_curve = get_model_flux_density(Teff)(lambd_dat)
+    model_curve = get_model_flux_density(Teff)(lambd)
     # Scale our "SED" to give the same average spectral flux density as Vega over the V filter
-    dl = np.diff(lambd_dat).mean()
-    avg_I_lambd = np.trapz(model_curve * tycho_v.tau(lambd_dat), dx=dl) / np.trapz(tycho_v.tau(lambd_dat), dx=dl)
-    norm = F0 / avg_I_lambd
-    rescaled_curve = get_model_flux_density(Teff)(lambd) * norm
-    # The average flux density of our new curve in our arbitrary filter is our zero-point flux density
     dl = np.diff(lambd).mean()
+    avg_I_lambd = np.trapz(model_curve * tycho_v.tau(lambd), dx=dl) / np.trapz(tycho_v.tau(lambd), dx=dl)
+    norm = F0 / avg_I_lambd
+    rescaled_curve = model_curve * norm
+    # The average flux density of our new curve in our arbitrary filter is our zero-point flux density
     F0_new = np.trapz(rescaled_curve * filter.tau(lambd), dx=dl) / np.trapz(filter.tau(lambd), dx=dl)
 
     # import matplotlib.pyplot as plt
@@ -252,15 +272,30 @@ def get_zero_point_flux(lambd, coord, width, height, filter: Filter):
     return F0_new
 
 
-def get_equivalent_mag(lambd, ref_mag, ref_filter, new_filter, model_flux_density):
+def get_equivalent_mag(lambd, ref_mag, ref_resp, new_resp, model_flux_density):
+    '''
+    Parameters
+    ----------
+    lambd : np.ndarray
+        Increasing array of wavelengths to evaluate curves at
+    ref_mag : float
+        magnitude in reference filter system
+    ref_resp : function
+        Evaluatable over lambd, the total response function of the optical system with the reference filter installed
+    new_resp : function
+        Evaluatable over lambd, the total response function of the optical system with the new filter installed
+    model_flux_density : function
+        Evaluatable over lambd, the flux density model for the star in question, in or convertible to W/cm^2/um
+    '''
     # https://adsabs.harvard.edu/full/1996BaltA...5..459S
     # assume suborbital platform: no atmospheric extinction
     # assume LOS out of galactic plane: negligible reddening/dust extinction
     dl = np.diff(lambd).mean()
-    numer = np.trapz(model_flux_density(lambd), new_filter.tau(lambd), dx=dl)
-    denom = np.trapz(model_flux_density(lambd), ref_filter.tau(lambd), dx=dl)
+    numer = np.trapz(model_flux_density(lambd) * new_resp(lambd), dx=dl).to(u.W / u.cm**2)
+    denom = np.trapz(model_flux_density(lambd) * ref_resp(lambd), dx=dl).to(u.W / u.cm**2)
     const = 2.5 * np.log(
-        np.trapz(new_filter.tau(lambd), dx=dl) / np.trapz(ref_filter.tau(lambd), dx=dl)
+        np.trapz(new_resp(lambd), dx=dl) /
+        np.trapz(ref_resp(lambd), dx=dl)
     )
     new_mag = -2.5 * np.log(numer / denom) + const + ref_mag
     return new_mag
@@ -296,7 +331,7 @@ def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
     return u.electron * (1. / (c.h * c.c)) * A_tel * np.trapz(lambd * eta * tau * flux, dx=lambd.diff().mean())
 
 
-def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_area=4, return_components=False):
+def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_area=4, sky_brightness_factor=.263, return_components=False):
     '''
     Parameters
     ----------
@@ -314,6 +349,9 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
         because a star that falls at the corner of a pixel will have its light
         spread evenly across a 4 pixel area. This also helps account for
         possible scattering, motion blur, and defocus.
+    sky_brightness_factor : float
+        Multiply the spectrum of the sky by this factor to explore different sun-relative pointings/altitudes.
+        A factor of 0.263 reproduces the background counts measured by the TIM SC2 during Fort Sumner 2024.
 
     Returns
     -------
@@ -336,7 +374,7 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
     ).decompose()
 
     # Model gives model gives W/cm^2/sr/um, want sky signal in 1 arcsec^2:
-    sky_flux = get_sky_brightness(lambd).to(u.W / u.cm**2 / u.arcsec**2 / u.um ) * u.arcsec**2
+    sky_flux = get_sky_brightness(lambd, scale_factor=sky_brightness_factor).to(u.W / u.cm**2 / u.arcsec**2 / u.um ) * u.arcsec**2
     sky_electrons_per_sec_per_sq_arcsec = electrons_per_sec_spectral(
         starcam.lens.tau(lambd) * starcam.filter.tau(lambd), # total optical transmission
         starcam.sensor.qe(lambd),
