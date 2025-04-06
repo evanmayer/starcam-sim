@@ -194,7 +194,7 @@ def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=2000):
 
 def get_median_Teff(coord, width, height, match_radius=1*u.arcsec, return_array=False):
     tycho_stars = get_tycho_stars(coord, width, height, mag_limit=9, nlimit=2000)
-    # Get a list of GAIA Teffs by cross-referencing the given ra/dec
+    # Get a list of Gaia Teffs by cross-referencing the given ra/dec
     gaia_dr3 = 'vizier:I/355/paramp'
     logging.info(f'Querying xMatch service... {coord}, {width}x{height}, r={match_radius}, {gaia_dr3}')
     table = XMatch.query(
@@ -247,9 +247,7 @@ def get_zero_point_flux(lambd, filter: Filter):
     # The zero point flux depends on the spectrum of the reference star, Vega, T_eff=9490K
     # avg of polar and equatorial temps, https://en.wikipedia.org/wiki/Vega
     # # Get median Teff in field
-    # Teff = get_median_Teff(coord, width, height)
     Teff = 9400 * u.K # this is the BB temp needed to get the Tycho V Vega zero-point flux.
-    # Why is this not anywhere close to the Vega spectrum?
     # Get a normalized spectral flux density curve for that Teff
     model_curve = get_model_flux_density(Teff)(lambd)
     # Scale our "SED" to give the same average spectral flux density as Vega over the V filter
