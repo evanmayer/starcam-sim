@@ -43,7 +43,10 @@ class Sensor(object):
         self.megapixels = self.shape[0] * self.shape[1] / 1e6 / u.pix**2
         self.sensor_size = (self.shape * self.px_size / u.pix).to(u.mm)
         self.bits = bits
-        self.frame_storage_size = bits * self.megapixels * 1e6
+        # Assume no fancy bit-packing to store data on disk:
+        # store the integer number of bytes required to represent the ADC data.
+        num_bytes_disk = np.ceil(bits / 8)
+        self.frame_storage_size = num_bytes_disk * 8 * self.megapixels * 1e6
 
         if qe_table is None:
             x = np.arange(400, 1100, 100) * u.nm
@@ -329,7 +332,7 @@ def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
     return u.electron * (1. / (c.h * c.c)) * A_tel * np.trapz(lambd * eta * tau * flux, dx=lambd.diff().mean())
 
 
-def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_area=4, sky_brightness_factor=.263, return_components=False):
+def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_area=4, aberration_multiplier=13, sky_brightness_factor=.263, return_components=False):
     '''
     Parameters
     ----------
@@ -347,6 +350,11 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
         because a star that falls at the corner of a pixel will have its light
         spread evenly across a 4 pixel area. This also helps account for
         possible scattering, motion blur, and defocus.
+    aberration_multiplier (optional): float
+        Multiply the diffraction-limited PSF by a factor to account for
+        imperfect optics. Refractors (like commercial lenses) are not
+        diffraction-limited. In TIM ground-based testing, we achieved typical
+         PSFs ~13x the diffraction limit, in average seeing.
     sky_brightness_factor : float
         Multiply the spectrum of the sky by this factor to explore different sun-relative pointings/altitudes.
         A factor of 0.263 reproduces the background counts measured by the TIM SC2 during Fort Sumner 2024.
@@ -359,7 +367,7 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
     D = starcam.sensor.dark_current
     R = starcam.sensor.read_noise
     plate_scale_arcsec_per_px = starcam.plate_scale.mean()
-    psf_diam = starcam.lens.fwhm(lambd).mean()
+    psf_diam = starcam.lens.fwhm(lambd).mean() * aberration_multiplier
 
     # Source signal
     flux = starcam.filter.zero_point_flux * (10. ** (-0.4 * target_mag))
@@ -371,7 +379,7 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
         flux
     ).decompose()
 
-    # Model gives model gives W/cm^2/sr/um, want sky signal in 1 arcsec^2:
+    # Model gives W/cm^2/sr/um, want sky signal in 1 arcsec^2:
     sky_flux = get_sky_brightness(lambd, scale_factor=sky_brightness_factor).to(u.W / u.cm**2 / u.arcsec**2 / u.um ) * u.arcsec**2
     sky_electrons_per_sec_per_sq_arcsec = electrons_per_sec_spectral(
         starcam.lens.tau(lambd) * starcam.filter.tau(lambd), # total optical transmission
@@ -384,7 +392,7 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
     # fake aperture photometry: all source photons end up inside the aperture
 
     aperture_area_px = np.pi * (psf_diam.to(u.arcsec) / plate_scale_arcsec_per_px.to(u.arcsec / u.pix) / 2.)**2
-    logging.debug(f'aperture area px: {aperture_area_px}')
+    logging.info(f'{starcam.name} aperture area px: {aperture_area_px}')
     if min_aperture_area > 0:
         # the aperture is matched to the greater of the two: PSF or the minimum.
         # if seeing is to be considered, it shall be considered in the psf diameter.
@@ -428,7 +436,7 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
     snr = signal_to_noise_oir_ccd(
         t,
         source_electrons_per_sec / u.electron, # really wants 1/s
-        sky_electrons_per_sec / u.electron,
+        sky_electrons_per_sec_per_px / u.electron * u.pix**2,
         D,
         R,
         aperture_area_px.value,
