@@ -392,7 +392,7 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
     # fake aperture photometry: all source photons end up inside the aperture
 
     aperture_area_px = np.pi * (psf_diam.to(u.arcsec) / plate_scale_arcsec_per_px.to(u.arcsec / u.pix) / 2.)**2
-    logging.info(f'{starcam.name} aperture area px: {aperture_area_px}')
+    logging.debug(f'{starcam.name} aperture area px: {aperture_area_px}')
     if min_aperture_area > 0:
         # the aperture is matched to the greater of the two: PSF or the minimum.
         # if seeing is to be considered, it shall be considered in the psf diameter.
