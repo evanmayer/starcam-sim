@@ -184,7 +184,7 @@ def calc_limiting_mag(snr_limit, mags, snrs):
 
 def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=2000):
     query = Vizier(
-        columns=['RAmdeg', 'DEmdeg', 'BTmag', 'VTmag'],
+        columns=['RAmdeg', 'DEmdeg', 'BTmag', 'VTmag', '_RAJ2000', '_DEJ2000'],#, 'RA(ICRS)', 'DE(ICRS)'],
         column_filters={'VTmag' : f'<{mag_limit}'},
         row_limit=10000,
         timeout=120,
@@ -202,7 +202,7 @@ def get_median_Teff(coord, width, height, match_radius=1*u.arcsec, return_array=
     logging.info(f'Querying xMatch service... {coord}, {width}x{height}, r={match_radius}, {gaia_dr3}')
     table = XMatch.query(
         cat1=tycho_stars,
-        colRA1='RAmdeg',
+        colRA1='_RAJ2000',
         colDec1='DEmdeg',
         cat2=gaia_dr3,
         max_distance=match_radius
