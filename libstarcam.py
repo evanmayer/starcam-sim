@@ -190,13 +190,13 @@ def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=2000):
         timeout=120,
     )
     logging.info(f'Querying Vizier service... {coord}, {width}x{height}')
-    table = query.query_region(coord, width=width, height=height, catalog='I/259/tyc2')[0]
+    table = query.query_region(coord, width=width, height=height, catalog=['I/259/tyc2'])[0]
     table.sort('VTmag')
     return table[:nlimit]
 
 
 def get_median_Teff(coord, width, height, match_radius=1*u.arcsec, return_array=False):
-    tycho_stars = get_tycho_stars(coord, width, height, mag_limit=9, nlimit=2000)
+    tycho_stars = get_tycho_stars(coord, width, height, mag_limit=9, nlimit=10000)
     # Get a list of Gaia Teffs by cross-referencing the given ra/dec
     gaia_dr3 = 'vizier:I/355/paramp'
     logging.info(f'Querying xMatch service... {coord}, {width}x{height}, r={match_radius}, {gaia_dr3}')
