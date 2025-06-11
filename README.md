@@ -45,3 +45,10 @@ If you'd like to contribute to this repo, simply open a pull request and I'll re
 * New lens models?
 * New filters?
 * New atmosphere models?
+
+## Attributions
+
+The synthetic photometry procedure was originally described in [doi:10.1515/astro-1996-0308](https://ui.adsabs.harvard.edu/link_gateway/1996BaltA...5..459S/doi:10.1515/astro-1996-0308).
+
+This research has made use of the SVO Filter Profile Service "Carlos Rodrigo", funded by MCIN/AEI/10.13039/501100011033/ through grant PID2023-146210NB-I00.
+SVO provided TYCHO_TYCHO.V.dat, the Tycho-2 V filter profile.
