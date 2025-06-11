@@ -240,7 +240,7 @@ def get_zero_point_flux(lambd, filter: Filter):
     # Vega system, non-Bessel calibration
     # calibration reference: https://ui.adsabs.harvard.edu/abs/1995A&A...304..110G/abstract
     F0 = (3.99504e-9 * u.erg / u.s / u.cm**2 / u.angstrom).to(u.W / u.cm**2 / u.um)
-    # F0 actually has units of spectral flux density, so I am assuming F0 is
+    # F0 actually has units of spectral flux density, so I am assuming F0 is    
     # actually the average spectral flux density, and F0 * \Delta \lambda, the
     # filter equivalent width, gives the zero-point flux.
     lambd_dat, tau = np.genfromtxt('./TYCHO_TYCHO.V.dat', dtype=float, unpack=True)
@@ -255,11 +255,11 @@ def get_zero_point_flux(lambd, filter: Filter):
     model_curve = get_model_flux_density(Teff)(lambd)
     # Scale our "SED" to give the same average spectral flux density as Vega over the V filter
     dl = np.diff(lambd).mean()
-    avg_I_lambd = np.trapz(model_curve * tycho_v.tau(lambd), dx=dl) / np.trapz(tycho_v.tau(lambd), dx=dl)
+    avg_I_lambd = np.trapezoid(model_curve * tycho_v.tau(lambd), dx=dl) / np.trapezoid(tycho_v.tau(lambd), dx=dl)
     norm = F0 / avg_I_lambd
     rescaled_curve = model_curve * norm
     # The average flux density of our new curve in our arbitrary filter is our zero-point flux density
-    F0_new = np.trapz(rescaled_curve * filter.tau(lambd), dx=dl) / np.trapz(filter.tau(lambd), dx=dl)
+    F0_new = np.trapezoid(rescaled_curve * filter.tau(lambd), dx=dl) / np.trapezoid(filter.tau(lambd), dx=dl)
 
     # import matplotlib.pyplot as plt
     # fig, ax = plt.subplots()
@@ -292,11 +292,11 @@ def get_equivalent_mag(lambd, ref_mag, ref_resp, new_resp, model_flux_density):
     # assume suborbital platform: no atmospheric extinction
     # assume LOS out of galactic plane: negligible reddening/dust extinction
     dl = np.diff(lambd).mean()
-    numer = np.trapz(model_flux_density(lambd) * new_resp(lambd), dx=dl).to(u.W / u.cm**2)
-    denom = np.trapz(model_flux_density(lambd) * ref_resp(lambd), dx=dl).to(u.W / u.cm**2)
+    numer = np.trapezoid(model_flux_density(lambd) * new_resp(lambd), dx=dl).to(u.W / u.cm**2)
+    denom = np.trapezoid(model_flux_density(lambd) * ref_resp(lambd), dx=dl).to(u.W / u.cm**2)
     const = 2.5 * np.log(
-        np.trapz(new_resp(lambd), dx=dl) /
-        np.trapz(ref_resp(lambd), dx=dl)
+        np.trapezoid(new_resp(lambd), dx=dl) /
+        np.trapezoid(ref_resp(lambd), dx=dl)
     )
     new_mag = -2.5 * np.log(numer / denom) + const + ref_mag
     return new_mag
