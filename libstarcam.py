@@ -164,7 +164,7 @@ def get_filter_transmission(lambd, center=650*u.nm, center2=None, width=7*u.nm, 
         return cut0 * cut1 / (np.max(cut0*cut1))
 
 
-def get_sky_brightness(lambd, scale_factor=0.263):
+def get_sky_brightness(lambd, scale_factor=0.263, altitude=35*u.km):
     # A scale factor of 0.263 is required to match the ADUs measured by SC2 in
     # the Fort Sumner test flight with the predictions of the SC2 hardware
     # model.
@@ -174,7 +174,11 @@ def get_sky_brightness(lambd, scale_factor=0.263):
     plot_lambd = np.array([400, 500, 600, 700, 800, 900, 1000, 1100, 1200]) * u.nm
     plot_val = 1e-5 * np.array([10., 5., 2.2, 1., 0.5, 0.2, 0.1, 0.0, 0.0]) * u.W / u.cm**2 / u.sr / u.um
     interp = PchipInterpolator(plot_lambd, plot_val)
-    return scale_factor * interp(lambd) * plot_val.unit
+    # Alexander+ 1999, Fig. 4
+    scale_height = 7.348 * u.km
+    literature_alt = 35 * u.km
+    altitude_scale_factor = np.exp(-(altitude - literature_alt) / scale_height)
+    return scale_factor * altitude_scale_factor * interp(lambd) * plot_val.unit 
 
 
 def calc_limiting_mag(snr_limit, mags, snrs):
@@ -255,11 +259,11 @@ def get_zero_point_flux(lambd, filter: Filter):
     model_curve = get_model_flux_density(Teff)(lambd)
     # Scale our "SED" to give the same average spectral flux density as Vega over the V filter
     dl = np.diff(lambd).mean()
-    avg_I_lambd = np.trapezoid(model_curve * tycho_v.tau(lambd), dx=dl) / np.trapezoid(tycho_v.tau(lambd), dx=dl)
+    avg_I_lambd = np.trapz(model_curve * tycho_v.tau(lambd), dx=dl) / np.trapz(tycho_v.tau(lambd), dx=dl)
     norm = F0 / avg_I_lambd
     rescaled_curve = model_curve * norm
     # The average flux density of our new curve in our arbitrary filter is our zero-point flux density
-    F0_new = np.trapezoid(rescaled_curve * filter.tau(lambd), dx=dl) / np.trapezoid(filter.tau(lambd), dx=dl)
+    F0_new = np.trapz(rescaled_curve * filter.tau(lambd), dx=dl) / np.trapz(filter.tau(lambd), dx=dl)
 
     # import matplotlib.pyplot as plt
     # fig, ax = plt.subplots()
@@ -292,11 +296,11 @@ def get_equivalent_mag(lambd, ref_mag, ref_resp, new_resp, model_flux_density):
     # assume suborbital platform: no atmospheric extinction
     # assume LOS out of galactic plane: negligible reddening/dust extinction
     dl = np.diff(lambd).mean()
-    numer = np.trapezoid(model_flux_density(lambd) * new_resp(lambd), dx=dl).to(u.W / u.cm**2)
-    denom = np.trapezoid(model_flux_density(lambd) * ref_resp(lambd), dx=dl).to(u.W / u.cm**2)
+    numer = np.trapz(model_flux_density(lambd) * new_resp(lambd), dx=dl).to(u.W / u.cm**2)
+    denom = np.trapz(model_flux_density(lambd) * ref_resp(lambd), dx=dl).to(u.W / u.cm**2)
     const = 2.5 * np.log(
-        np.trapezoid(new_resp(lambd), dx=dl) /
-        np.trapezoid(ref_resp(lambd), dx=dl)
+        np.trapz(new_resp(lambd), dx=dl) /
+        np.trapz(ref_resp(lambd), dx=dl)
     )
     new_mag = -2.5 * np.log(numer / denom) + const + ref_mag
     return new_mag
@@ -332,7 +336,17 @@ def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
     return u.electron * (1. / (c.h * c.c)) * A_tel * np.trapz(lambd * eta * tau * flux, dx=lambd.diff().mean())
 
 
-def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_area=4, aberration_multiplier=13, sky_brightness_factor=.263, return_components=False):
+def simple_snr_spectral(
+    t,
+    lambd,
+    target_mag,
+    starcam: StarCamera,
+    min_aperture_area=4,
+    aberration_multiplier=13,
+    sky_brightness_factor=.263,
+    altitude=35*u.km,
+    return_components=False
+):
     '''
     Parameters
     ----------
@@ -355,9 +369,12 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
         imperfect optics. Refractors (like commercial lenses) are not
         diffraction-limited. In TIM ground-based testing, we achieved typical
          PSFs ~13x the diffraction limit, in average seeing.
+    altitude : astropy.Quantity, length
+        Scale the sky irradiance spectrum according to Alexander+1999
     sky_brightness_factor : float
         Multiply the spectrum of the sky by this factor to explore different sun-relative pointings/altitudes.
         A factor of 0.263 reproduces the background counts measured by the TIM SC2 during Fort Sumner 2024.
+        A factor of X and altitude 38 km reproduces the background counts measured by the TIMcam piggyback during Fort Sumner 2025.
 
     Returns
     -------
@@ -380,7 +397,7 @@ def simple_snr_spectral(t, lambd, target_mag, starcam: StarCamera, min_aperture_
     ).decompose()
 
     # Model gives W/cm^2/sr/um, want sky signal in 1 arcsec^2:
-    sky_flux = get_sky_brightness(lambd, scale_factor=sky_brightness_factor).to(u.W / u.cm**2 / u.arcsec**2 / u.um ) * u.arcsec**2
+    sky_flux = get_sky_brightness(lambd, scale_factor=sky_brightness_factor, altitude=altitude).to(u.W / u.cm**2 / u.arcsec**2 / u.um ) * u.arcsec**2
     sky_electrons_per_sec_per_sq_arcsec = electrons_per_sec_spectral(
         starcam.lens.tau(lambd) * starcam.filter.tau(lambd), # total optical transmission
         starcam.sensor.qe(lambd),

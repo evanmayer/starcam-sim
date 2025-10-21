@@ -8,6 +8,8 @@ This calculator is organized as a "composable system": Component models for filt
 
 This is a powerful tool for trade studies, where combining simple models of the sky and stars can give performance indications like SNR of individual stars in the field, number of detected stars, and ancillary data like cost and storage footprints.
 
+I first presented this package at the Scientific Ballooning Technologies Conference at the University of Minnesota in 2025.
+
 ## Assumptions
 
 ### Stellar Modeling
