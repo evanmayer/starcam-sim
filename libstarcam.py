@@ -4,7 +4,6 @@ import numpy as np
 
 from astropy import units as u
 from astropy import constants as c
-import astropy.coordinates as coord
 from astropy.stats import signal_to_noise_oir_ccd
 from astroquery.vizier import Vizier
 from astroquery.xmatch import XMatch
@@ -34,11 +33,12 @@ class InterpolatableTable(object):
 class Sensor(object):
     def __init__(self, shape, px_size, dark_current, read_noise, full_well, bits, gain_adu_per_e=1./u.electron, qe_table=None, name=None, cost=0):
         self.shape = shape * u.pix
-        self.px_size = px_size
-        self.dark_current = dark_current
-        self.read_noise = read_noise
-        self.full_well = full_well
-        self.gain_adu_per_e = gain_adu_per_e
+        assert len(self.shape) == 2
+        self.px_size = px_size.to(u.micron)
+        self.dark_current = dark_current.to(u.electron / u.s)
+        self.read_noise = read_noise.to(u.electron)
+        self.full_well = full_well.to(u.electron / u.pix)
+        self.gain_adu_per_e = gain_adu_per_e.to(1. / u.electron)
 
         self.megapixels = self.shape[0] * self.shape[1] / 1e6 / u.pix**2
         self.sensor_size = (self.shape * self.px_size / u.pix).to(u.mm)
@@ -49,6 +49,7 @@ class Sensor(object):
         self.frame_storage_size = num_bytes_disk * 8 * self.megapixels * 1e6
 
         if qe_table is None:
+            logging.warning('No quantum efficiency curve supplied. Assuming unity QE 400-1100 nm.')
             x = np.arange(400, 1100, 100) * u.nm
             y = np.ones_like(x.value)
             self.qe_table = InterpolatableTable(x, y)
@@ -67,13 +68,24 @@ class Sensor(object):
 
 
 class Lens(object):
-    def __init__(self, focal_length, aperture_diam, tau_table=None, name=None, cost=0):
-        self.f = focal_length
-        self.d = aperture_diam
+    def __init__(self, focal_length, aperture_diam, tau_table=None, aberration_multiplier=10, name=None, cost=0):
+        '''
+        aberration_multiplier (optional): float
+            Multiply the diffraction-limited PSF by a factor to account for
+            imperfect optics. Refractors (like commercial lenses) are not
+            diffraction-limited. In TIM ground-based testing, we achieved typical
+            PSFs ~13x the diffraction limit, in average seeing. In TIMcam at
+            float, we achieved typical PSFs ~7-13x the diffraction limit,
+            focus-dependent.
+        '''
+        self.f = focal_length.to(u.mm)
+        self.d = aperture_diam.to(u.mm)
+        self.aberration_multiplier = aberration_multiplier
 
         self.area = np.pi * (self.d / 2.) ** 2
 
         if tau_table is None:
+            logging.warning('No optical transmission curve supplied. Assuming unity tau 400-1100 nm.')
             x = np.arange(400, 1100, 100) * u.nm
             y = np.ones_like(x.value)
             self.tau_table = InterpolatableTable(x, y)
@@ -88,14 +100,14 @@ class Lens(object):
         self.cost = cost
 
     def fwhm(self, lambd):
-         return (1.029 * u.rad * lambd.to(u.m) / self.d.to(u.m)).to(u.arcsec)
+         return (1.029 * u.rad * lambd.to(u.m) / self.d.to(u.m)).to(u.arcsec) * self.aberration_multiplier
 
     def airy_diam(self, lambd):
-        return (2 * 1.22 * u.rad * lambd.to(u.m) / self.d.to(u.m)).to(u.arcsec)
+        return (2 * 1.22 * u.rad * lambd.to(u.m) / self.d.to(u.m)).to(u.arcsec) * self.aberration_multiplier
 
     def spot_size(self, lambd):
         NA = 1 / (2 * self.f / self.d)
-        return (1.22 * lambd / NA).to(u.um)
+        return (1.22 * lambd / NA).to(u.um) * self.aberration_multiplier
 
     def tau(self, lambd):
         return self.tau_table.interp(lambd)
@@ -138,6 +150,9 @@ class StarCamera(object):
 
         self.fov = 2 * np.arctan(sensor.sensor_size / 2 / lens.f).to(u.deg)
         self.plate_scale = (self.fov / sensor.shape).to(u.arcsec / u.pix)
+    
+    def __repr__(self):
+        return self.name
 
     def get_mean_lambd(self, lambd):
         # filter-weighted mean wavelength
@@ -186,21 +201,22 @@ def calc_limiting_mag(snr_limit, mags, snrs):
     return snr_table.interp(snr_limit)
 
 
-def get_tycho_stars(coord, width, height, mag_limit=9, nlimit=2000):
+def get_tycho_stars(coord, width, height, mag_limit=10, nlimit=1000):
     query = Vizier(
         columns=['RAmdeg', 'DEmdeg', 'BTmag', 'VTmag', '_RAJ2000', '_DEJ2000'],#, 'RA(ICRS)', 'DE(ICRS)'],
         column_filters={'VTmag' : f'<{mag_limit}'},
-        row_limit=10000,
-        timeout=120,
+        row_limit=1000,
+        timeout=240,
     )
     logging.info(f'Querying Vizier service... {coord}, {width}x{height}')
-    table = query.query_region(coord, width=width, height=height, catalog=['I/259/tyc2'])[0]
-    table.sort('VTmag')
-    return table[:nlimit]
+    table = query.query_region(coord, width=width, height=height, catalog=['I/259/tyc2'])
+    t = table[table.keys()[0]]
+    t.sort('VTmag')
+    return t[:nlimit]
 
 
 def get_median_Teff(coord, width, height, match_radius=1*u.arcsec, return_array=False):
-    tycho_stars = get_tycho_stars(coord, width, height, mag_limit=9, nlimit=10000)
+    tycho_stars = get_tycho_stars(coord, width, height, mag_limit=10, nlimit=1000)
     # Get a list of Gaia Teffs by cross-referencing the given ra/dec
     gaia_dr3 = 'vizier:I/355/paramp'
     logging.info(f'Querying xMatch service... {coord}, {width}x{height}, r={match_radius}, {gaia_dr3}')
@@ -244,7 +260,7 @@ def get_zero_point_flux(lambd, filter: Filter):
     # Vega system, non-Bessel calibration
     # calibration reference: https://ui.adsabs.harvard.edu/abs/1995A&A...304..110G/abstract
     F0 = (3.99504e-9 * u.erg / u.s / u.cm**2 / u.angstrom).to(u.W / u.cm**2 / u.um)
-    # F0 actually has units of spectral flux density, so I am assuming F0 is    
+    # F0 actually has units of spectral flux density, so I am assuming F0 is
     # actually the average spectral flux density, and F0 * \Delta \lambda, the
     # filter equivalent width, gives the zero-point flux.
     lambd_dat, tau = np.genfromtxt('./TYCHO_TYCHO.V.dat', dtype=float, unpack=True)
@@ -342,7 +358,6 @@ def simple_snr_spectral(
     target_mag,
     starcam: StarCamera,
     min_aperture_area=4,
-    aberration_multiplier=13,
     sky_brightness_factor=.263,
     altitude=35*u.km,
     return_components=False
@@ -355,7 +370,7 @@ def simple_snr_spectral(
     lambd : np.ndarray
         Array of wavelengths to evaluate wavelength-dependent quantities at
     target_mag : float
-        magnitude of target in filter for which tel_params['zero_point_flux'] is given
+        magnitude of target in filter for which the zero point flux is given
     starcam: StarCamera
     min_aperture_area (optional): int
         For optics with diffraction-limited resolution finer than the plate
@@ -364,17 +379,13 @@ def simple_snr_spectral(
         because a star that falls at the corner of a pixel will have its light
         spread evenly across a 4 pixel area. This also helps account for
         possible scattering, motion blur, and defocus.
-    aberration_multiplier (optional): float
-        Multiply the diffraction-limited PSF by a factor to account for
-        imperfect optics. Refractors (like commercial lenses) are not
-        diffraction-limited. In TIM ground-based testing, we achieved typical
-         PSFs ~13x the diffraction limit, in average seeing.
     altitude : astropy.Quantity, length
         Scale the sky irradiance spectrum according to Alexander+1999
     sky_brightness_factor : float
         Multiply the spectrum of the sky by this factor to explore different sun-relative pointings/altitudes.
-        A factor of 0.263 reproduces the background counts measured by the TIM SC2 during Fort Sumner 2024.
-        A factor of X and altitude 38 km reproduces the background counts measured by the TIMcam piggyback during Fort Sumner 2025.
+        A factor of 0.263 and altitude 37 km reproduces the background counts measured by the TIM SC2 during Fort Sumner 2024.
+        A factor of 0.146 and altitude 38 km reproduces the background counts measured by the TIMcam piggyback during Fort Sumner 2025.
+        A factor of 1 and altitude 35 km reproduces the spectrum from Alexander+1999 Fig.4 MODTRAN.
 
     Returns
     -------
@@ -384,7 +395,7 @@ def simple_snr_spectral(
     D = starcam.sensor.dark_current
     R = starcam.sensor.read_noise
     plate_scale_arcsec_per_px = starcam.plate_scale.mean()
-    psf_diam = starcam.lens.fwhm(lambd).mean() * aberration_multiplier
+    psf_diam = starcam.lens.fwhm(starcam.get_mean_lambd(lambd))
 
     # Source signal
     flux = starcam.filter.zero_point_flux * (10. ** (-0.4 * target_mag))
@@ -419,6 +430,10 @@ def simple_snr_spectral(
 
     sky_electrons_per_sec_per_px = sky_electrons_per_sec_per_sq_arcsec * (plate_scale_arcsec_per_px ** 2)
 
+    warned_source_sat = False
+    warned_sky_sat = False
+    warned_sum_sat = False
+
     source_electrons_per_px_per_exposure = source_electrons_per_sec * t / aperture_area_px * u.pix
     if source_electrons_per_px_per_exposure > starcam.sensor.full_well:
         logging.warning(
@@ -426,6 +441,7 @@ def simple_snr_spectral(
             f'{source_electrons_per_px_per_exposure:.0f} > {starcam.sensor.full_well:.0f}\n' +
             f'sensor: {starcam.sensor.name}, lens: {starcam.lens.name}, filter: {starcam.filter.name}'
         )
+        warned_source_sat = True
 
     sky_electrons_per_px_per_exposure = sky_electrons_per_sec_per_px * t * u.pix
     if sky_electrons_per_px_per_exposure > starcam.sensor.full_well:
@@ -434,6 +450,7 @@ def simple_snr_spectral(
             f'{sky_electrons_per_px_per_exposure:.0f} > {starcam.sensor.full_well:.0f}\n' + 
             f'sensor: {starcam.sensor.name}, lens: {starcam.lens.name}, filter: {starcam.filter.name}'
         )
+        warned_sky_sat = True
 
     if source_electrons_per_px_per_exposure + sky_electrons_per_px_per_exposure > starcam.sensor.full_well:
         logging.warning(
@@ -441,6 +458,7 @@ def simple_snr_spectral(
             f'{source_electrons_per_px_per_exposure + sky_electrons_per_px_per_exposure:.0f} > {starcam.sensor.full_well:.0f}\n' + 
             f'sensor: {starcam.sensor.name}, lens: {starcam.lens.name}, filter: {starcam.filter.name}'
         )
+        warned_sum_sat = True
 
     sky_electrons_per_sec = sky_electrons_per_sec_per_px * aperture_area_px
 
@@ -454,11 +472,11 @@ def simple_snr_spectral(
         t,
         source_electrons_per_sec / u.electron, # really wants 1/s
         sky_electrons_per_sec_per_px / u.electron * u.pix**2,
-        D,
-        R,
+        D / u.electron,
+        R / u.electron,
         aperture_area_px.value,
         gain=1 # all values in electrons already
     )
     if return_components:
-        return snr, (source_electrons_per_sec, sky_electrons_per_sec, aperture_area_px)
+        return snr, (source_electrons_per_sec, sky_electrons_per_sec, aperture_area_px), (warned_source_sat, warned_sky_sat, warned_sum_sat)
     return snr
