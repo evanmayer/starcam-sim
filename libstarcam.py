@@ -174,14 +174,14 @@ def get_filter_transmission(lambd, center=650*u.nm, center2=None, width=7*u.nm, 
     if center2 is None:
         return max_transmission * (1. / (1. + np.exp(-scale * (lambd - center))))
     else: # Hack to test narrowband filters
-        cut0 = max_transmission * (1. / (1. + np.exp(-scale * (lambd - center))))
-        cut1 = max_transmission - max_transmission * (1. / (1. + np.exp(-scale * (lambd - center2))))
-        return cut0 * cut1 / (np.max(cut0*cut1))
+        cut0 = (1. / (1. + np.exp(-scale * (lambd - center))))
+        cut1 = 1 - (1. / (1. + np.exp(-scale * (lambd - center2))))
+        return max_transmission * cut0 * cut1
 
 
 def get_sky_brightness(lambd, scale_factor=0.263, altitude=35*u.km):
     # A scale factor of 0.263 is required to match the ADUs measured by SC2 in
-    # the Fort Sumner test flight with the predictions of the SC2 hardware
+    # the Fort Sumner 2024 test flight with the predictions of the SC2 hardware
     # model.
     # Alexander 1999, Fig. 4
     # MODTRAN, 35km, 30deg SZA
@@ -249,7 +249,7 @@ def get_model_flux_density(Teff, norm=True):
     if norm:
         model_curve = lambda lambd: (res(lambd) / np.nanmax(res(lambd)).value) * u.sr
     else:
-        model_curve = lambda lambd: (res(lambd)) * u.sr
+        model_curve = lambda lambd: (res(lambd))
     # Now do you see why I call all of my wavelength arrays lambd?
     return model_curve
 
@@ -341,8 +341,6 @@ def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
         The wavelength array being integrated over, in meters
     flux
         The absolute flux in W / (cm^2 um)
-    mag_per : float
-        The relative flux in magnitudes of the source.
 
     Returns
     -------
