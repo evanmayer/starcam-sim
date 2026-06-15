@@ -18,7 +18,21 @@ from synphot import (Empirical1D,
 
 
 class InterpolatableTable(object):
+    '''
+    Provide smoothed lookup tables for user-supplied input data.
+    '''
     def __init__(self, x, y, clamp_edges=False):
+        '''
+        Parameters
+        ----------
+        x : np.ndarray
+            Array of abscissa
+        y : np.ndarray
+            Array of ordinate
+        clamp_edges : bool (optional)
+            If True, add data points to the beginning and end of x for which
+            y = 0.
+        '''
         assert x.shape == y.shape
         self.x = x
         self.y = y
@@ -32,12 +46,52 @@ class InterpolatableTable(object):
             self.y[2:-2] = y
 
     def interp(self, x_new):
+        '''
+        Return the interpolated values at the supplied x-coordinates
+
+        Parameters
+        ----------
+        x_new : float, np.ndarray
+            Query value(s) for interpolation
+
+        Returns
+        -------
+        Interpolated value(s)
+        '''
         pchip_interp = PchipInterpolator(self.x, self.y)
         return pchip_interp(x_new)
 
 
 class Sensor(object):
+    '''
+    Container object for properties related to CCD/CMOS imagers
+    '''
     def __init__(self, shape, px_size, dark_current, read_noise, full_well, bits, gain_adu_per_e=1./u.electron, qe_table=None, name=None, cost=0):
+        '''
+        Parameters
+        ----------
+        shape : tuple
+            2-element tuple describing the number of pixels along each sensor
+            axis
+        px_size : astropy.Quantity, length
+            Assuming square pixels, the side length of one pixel
+        dark_current : astropy.Quantity, e-/s
+            Sensor dark current, in e-/s
+        read_noise : astropy.Quantity
+            Sensor read noise per exposure, in e-
+        full_well : astropy.Quantity
+            Sensor full well capacity in e-/pix (base gain)
+        gain_adu_per_e : astropy.Quantity (optional)
+            Conversion factor between electrons and ADC data numbers, units
+            1/e-. If not supplied, default is 1:1.
+        qe_table : InterpolatableTable (optional)
+            Lookup table for sensor quantum efficiency. All sensors assumed
+            mono. If not supplied, default is 1.0 from 400-1100 nm.
+        name : str (optional)
+            Name for printing. If not supplied, default is blank str.
+        cost : float (optional)
+            Cost for summing into system cost. If not supplied, default is 0.
+        '''
         self.shape = shape * u.pix
         assert len(self.shape) == 2
         self.px_size = px_size.to(u.micron)
@@ -69,20 +123,51 @@ class Sensor(object):
 
         self.cost = cost
 
+    def __repr__(self):
+        return self.name
+
     def qe(self, lambd):
+        '''
+        Return the interpolated quantum efficiency values at the supplied
+        wavelength coordinates
+
+        Parameters
+        ----------
+        lambd : astropy.Quantity, must match units QE was initialized with
+            Wavelength coordinates for lookup
+
+        Returns
+        -------
+        Interpolated value(s)
+        '''
         return self.qe_table.interp(lambd)
 
 
 class Lens(object):
+    '''
+    Container object for properties related to focusing optics.
+    '''
     def __init__(self, focal_length, aperture_diam, tau_table=None, aberration_multiplier=10, name=None, cost=0):
         '''
-        aberration_multiplier (optional): float
+        focal_length : astropy.Quantity, length
+            Optic focal length
+        aperture_diam : astropy.Quantity, length
+            Optic aperture
+        tau_table : InterpolatableTable (optional)
+            Transmission vs. wavelength table. For instance, this would include
+            glass absorption and coating transmission, if available. If not
+            supplied, default is 1.0 from 400-1100 nm.
+        aberration_multiplier : float (optional)
             Multiply the diffraction-limited PSF by a factor to account for
             imperfect optics. Refractors (like commercial lenses) are not
             diffraction-limited. In TIM ground-based testing, we achieved typical
             PSFs ~13x the diffraction limit, in average seeing. In TIMcam at
             float, we achieved typical PSFs ~7-13x the diffraction limit,
             focus-dependent.
+        name : str (optional)
+            Name for printing. If not supplied, default is blank str.
+        cost : float (optional)
+            Cost for summing into system cost. If not supplied, default is 0.
         '''
         self.f = focal_length.to(u.mm)
         self.d = aperture_diam.to(u.mm)
@@ -105,22 +190,95 @@ class Lens(object):
 
         self.cost = cost
 
+    def __repr__(self):
+        return self.name
+
     def fwhm(self, lambd):
-         return (1.029 * u.rad * lambd.to(u.m) / self.d.to(u.m)).to(u.arcsec) * self.aberration_multiplier
+        '''
+        Calculate the full width at half maximum of the point spread function,
+        as a function of wavelength.
+
+        Parameters
+        ----------
+        lambd : astropy.Quantity (length)
+            Operating wavelength(s)
+
+        Returns
+        -------
+            1.029 * aberration_multiplier * \lambda / D, converted to arcsec
+        '''
+        return (1.029 * u.rad * lambd.to(u.m) / self.d.to(u.m)).to(u.arcsec) * self.aberration_multiplier
 
     def airy_diam(self, lambd):
+        '''
+        Calculate the diameter of the first airy null as a function of
+        wavelength.
+
+        Parameters
+        ----------
+        lambd : astropy.Quantity (length)
+            Operating wavelength(s)
+
+        Returns
+        -------
+            2 * 1.22 * aberration_multiplier * \lambda / D, converted to arcsec
+        '''
         return (2 * 1.22 * u.rad * lambd.to(u.m) / self.d.to(u.m)).to(u.arcsec) * self.aberration_multiplier
 
     def spot_size(self, lambd):
+        '''
+        Calculate the spot size based on the numerical aperture.
+
+        Parameters
+        ----------
+        lambd : astropy.Quantity (length)
+            Operating wavelength(s)
+
+        Returns
+        -------
+           Spot size in microns 
+        '''
         NA = 1 / (2 * self.f / self.d)
         return (1.22 * lambd / NA).to(u.um) * self.aberration_multiplier
 
     def tau(self, lambd):
+        '''
+        Return the interpolated transmission values at the supplied wavelength
+        coordinates
+
+        Parameters
+        ----------
+        lambd : astropy.Quantity, must match units tau_table was initialized with
+            Wavelength coordinates for lookup
+
+        Returns
+        -------
+        Interpolated value(s)
+        '''
         return self.tau_table.interp(lambd)
 
 
 class Filter(object):
-    def __init__(self, zero_point_flux, tau_table=None, cost=0, name=None):
+    '''
+    Container for quantities related to band-defining filters.
+    '''
+    def __init__(self, zero_point_flux, tau_table=None, name=None, cost=0):
+        '''
+        zero_point_flux : astropy.Quantity
+            Flux of a 0th-magnitude star in the given filter, in W cm^-2 um^-1.
+            This should be the average flux from a transmission-weighted
+            integral over the reference star spectrum. For help finding or
+            calculating zero-point fluxes for a given filter, see the Spanish
+            Virtual Observatory Filter Profile Service:
+            https://svo2.cab.inta-csic.es/theory/fps/
+        tau_table : InterpolatableTable (optional)
+            Wavelength-dependent filter transmission curve. If not supplied,
+            default is 1.0 from 400-1100 nm.
+        name : str (optional)
+            Name for printing. If not supplied, default is blank str.
+        cost : float (optional)
+            Cost for summing into system cost. If not supplied, default is 0.
+        '''
         # the flux in W cm^-2 um^-1 of a magnitude 0 star
         self.zero_point_flux = zero_point_flux
         if tau_table is None:
@@ -137,18 +295,45 @@ class Filter(object):
         else:
             self.name = name
 
+    def __repr__(self):
+        return self.name
+
     def tau(self, lambd):
+        '''
+        Return the interpolated transmission values at the supplied wavelength
+        coordinates
+
+        Parameters
+        ----------
+        lambd : astropy.Quantity, must match units tau_table was initialized with
+            Wavelength coordinates for lookup
+
+        Returns
+        -------
+        Interpolated value(s)
+        '''
         return self.tau_table.interp(lambd)
 
 
 class StarCamera(object):
+    '''
+    Provide quantities that are derived from component parts of the star camera
+    system.
+    '''
     def __init__(self, sensor: Sensor, lens: Lens, filter: Filter, name=None):
+        '''
+        sensor : Sensor
+        lens : Lens
+        filter : filter
+        name : str (optional)
+            Name for printing. If not supplied, default is blank str.
+        '''
         self.sensor = sensor
         self.lens = lens
         self.filter = filter
         
         if name is None:
-            self.name = 'SC'
+            self.name = ''
         else:
             self.name = name
 
@@ -156,26 +341,83 @@ class StarCamera(object):
 
         self.fov = 2 * np.arctan(sensor.sensor_size / 2 / lens.f).to(u.deg)
         self.plate_scale = (self.fov / sensor.shape).to(u.arcsec / u.pix)
-    
+
     def __repr__(self):
         return self.name
 
     def get_mean_lambd(self, lambd):
-        # filter-weighted mean wavelength
-        return np.trapezoid(lambd * self.filter.tau(lambd), dx=np.diff(lambd).mean()) / np.trapezoid(self.filter.tau(lambd), dx=np.diff(lambd).mean())
-    
+        '''
+        Filter-weighted mean wavelength
+
+        Parameters
+        ----------
+        lambd : astropy.Quantity, must match units filter was initialized with
+            Wavelength coordinates for lookup
+        
+        Returns
+        -------
+        Filter-weighted mean wavelength
+        '''
+        return np.trapezoid(lambd * self.filter.tau(lambd), lambd) / np.trapezoid(self.filter.tau(lambd), lambd)
+
     def get_response(self, lambd):
+        '''
+        System response curve, the product of quantum efficiency, optics
+        transmission, and filter bandpass.
+
+        Parameters
+        ----------
+        lambd : astropy.Quantity, must match units filter, QE, and lens
+            transmission were initialized with
+            Wavelength coordinates for lookup
+
+        Returns
+        -------
+        Total response value(s), evaluated at lambd
+        '''
         return self.sensor.qe(lambd) * self.lens.tau(lambd) * self.filter.tau(lambd)
 
 
 # helpers
 def get_optics_transmission(lambd):
-    # optical system total transmission, sans filters
+    '''
+    Generate an array of 0.9 with shape matching lambd.
+
+    Parameters
+    ----------
+    lambd : astropy.Quantity
+    '''
     return np.ones_like(lambd.value) * 0.9
 
 
 def get_filter_transmission(lambd, center=650*u.nm, center2=None, width=7*u.nm, max_transmission=0.9):
-    # scaled and shifted sigmoid
+    '''
+    Generate a scaled and shifted sigmoid function representing a long-pass or
+    bandpass filter profile. Short-pass or bandstop filters could be generated
+    with 1-this profile.
+
+    Parameters
+    ----------
+    lambd : astropy.Quantity, length
+        Wavelength coordinates for lookup
+    center : astropy.Quantity, length (optional)
+        Filter cut-on wavelength, specified as 50% transmission. If not
+        supplied, default is 650 nm.
+    center2 : astropy.Quantity, length (optional)
+        Filter cut-off wavelength, specified as 50% transmission. If not
+        supplied, default is None, for a long-pass filter. This function has not
+        been tested with center2 < center.
+    width : astropy.Quantity, length, (optional)
+        Filter cut on/off transition width. Larger values give a smoother cut
+        on/off. If not supplied, default is 7 nm.
+    max_transmission : float
+        Value that all returned values are multiplied by, representing the
+        maximum value of the transmission curve. If not supplied, default is 0.9
+
+    Returns
+    -------
+    lambd-shaped array of transmission values
+    '''
     scale = 1. / width
     if center2 is None:
         return max_transmission * (1. / (1. + np.exp(-scale * (lambd - center))))
@@ -185,9 +427,35 @@ def get_filter_transmission(lambd, center=650*u.nm, center2=None, width=7*u.nm, 
         return max_transmission * cut0 * cut1
 
 
-def get_sky_brightness(lambd, scale_factor=0.263, altitude=35*u.km):
-    # A scale factor of 0.263 is required to match the ADUs measured by SC2 in
-    # the Fort Sumner 2024 test flight with the predictions of the SC2 hardware
+def get_sky_brightness(lambd, scale_factor=0.351, altitude=35*u.km):
+    '''
+    This is a coarse, smoothed model of the atmosphere spectrum based on Fig. 4
+    of Alexander+ 1999's MODTRAN spectrum, suitable for rough estimates of sky
+    brightness. It does not include any absorption or emission features. It is
+    defined from 400-1200 nm. A scale_factor of 1 and altitude of 35 km 
+    reproduces Fig. 4. Alternative altitudes scale the spectrum up or down
+    according to Alexander+ 1999's equation.
+
+    Parameters
+    ----------
+    lambd : astropy.Quantity, length
+        Wavelength coordinate(s) for lookup
+    scale_factor : float (optional)
+        Multiply the spectrum by this value. This is an easy way to simulate
+        brighter or dimmer sky conditions. If no value is supplied, the
+        normalization will reproduce the counts seen by TIMCam in 2025 at
+        37.8 km.
+    altitude : astropy.Quantity, length (optional)
+        Scales the spectrum up or down for lower or higher altitudes. If no
+        value is supplied, the default is 35 km.
+
+    Returns
+    -------
+    The sky specific intensity values, in W cm^-2 um^-1 sr^-1 for each lambd
+    value
+    '''
+    # A scale factor of 0.351 is required to match the photon counts of the
+    # TIMCam 2025 piggyback flight with the predictions of the TIMCam hardware
     # model.
     # Alexander 1999, Fig. 4
     # MODTRAN, 35km, 30deg SZA
@@ -203,11 +471,34 @@ def get_sky_brightness(lambd, scale_factor=0.263, altitude=35*u.km):
 
 
 def calc_limiting_mag(snr_limit, mags, snrs):
+    '''
+    Use an InterpolatableTable to back-interpolate a limiting magnitude from
+    an SNR-magnitude relation.
+    '''
     snr_table = InterpolatableTable(snrs, mags)
     return snr_table.interp(snr_limit)
 
 
 def get_tycho_stars(coord, width, height, mag_limit=11, nlimit=1000):
+    '''
+    Query the online Vizier Tycho2 database for a region of interest. Sorted by
+    VTmag.
+
+    Parameters
+    ----------
+    coord : astropy.coordinate.SkyCoord
+    width : astropy.Quantity, angle
+    height : astropy.Quantity, angle
+    mag_limit : float
+        Limiting Tycho2 magnitude. Default is 11, which is similar to the limit
+        for the constituents of astrometry.net 4100-series files.
+    nlimit : int
+        Limit the length of returned values
+
+    Returns
+    -------
+    astropy.Table instance with query results
+    '''
     query = Vizier(
         columns=['RAmdeg', 'DEmdeg', 'BTmag', 'VTmag', '_RAJ2000', '_DEJ2000'],#, 'RA(ICRS)', 'DE(ICRS)'],
         column_filters={'VTmag' : f'<{mag_limit}'},
@@ -222,6 +513,31 @@ def get_tycho_stars(coord, width, height, mag_limit=11, nlimit=1000):
 
 
 def get_median_Teff(coord, width, height, match_radius=1*u.arcsec):
+    '''
+    Query the Teff info associated with a region of sky. First, the Tycho
+    catalog is queried to get a list of candidate stars that would appear in an
+    astrometry.net database. Then, these stars are cross-matched with the Gaia
+    DR3 database to retrieve their effective tmperatures.
+
+    Parameters
+    ----------
+    coord : astropy.coordinate.SkyCoord
+    width : astropy.Quantity, angle
+    height : astropy.Quantity, angle
+    match_radius : astropy.Quantity, angle
+        Thershold for considering coordinates of objects in each database to be
+        a match.
+    nlimit : int
+        Limit the length of returned values
+
+    Returns
+    -------
+    median effective temperature: astropy.Quantity, K
+    astropy.Table entry with all retrieved Teffs in the FoV belonging to Tycho2
+        stars
+    astropy.Table instance with query results, including the full Gaia DR3
+        xmatch results, which we use later to get the RPmag values.
+    '''
     tycho_stars = get_tycho_stars(coord, width, height, mag_limit=11, nlimit=1000)
     # Get a list of Gaia Teffs by cross-referencing the given ra/dec
     gaia_dr3 = 'vizier:I/355/gaiadr3'
@@ -252,8 +568,8 @@ def get_model_flux_density(Teff):
 
     Parameters
     ----------
-    Teff : astropy.Quantity
-        Stellar effective temperature, units K
+    Teff : astropy.Quantity, K
+        Stellar effective temperature
 
     Returns
     -------
@@ -277,50 +593,22 @@ def get_model_flux_density(Teff):
     return model_curve
 
 
-def get_zero_point_flux_old(lambd, filter: Filter):
-    # Bootstrap off of an existing survey zero-point flux:
-    # TYCHO2 V: http://svo2.cab.inta-csic.es/svo/theory/fps/index.php?mode=browse&gname=TYCHO&asttype=
-    # Vega system, non-Bessel calibration
-    # calibration reference: https://ui.adsabs.harvard.edu/abs/1995A&A...304..110G/abstract
-    F0 = (3.99504e-9 * u.erg / u.s / u.cm**2 / u.angstrom).to(u.W / u.cm**2 / u.um)
-    # F0 actually has units of spectral flux density, so I am assuming F0 is
-    # actually the average spectral flux density, and F0 * \Delta \lambda, the
-    # filter equivalent width, gives the zero-point flux.
-    lambd_dat, tau = np.genfromtxt('./TYCHO_TYCHO.V.dat', dtype=float, unpack=True)
-    lambd_dat = (lambd_dat * u.angstrom).to(u.nm)
-    tycho_v = Filter(F0, tau_table=InterpolatableTable(lambd_dat, tau, clamp_edges=True), name='Tycho V')
-
-    # The zero point flux depends on the spectrum of the reference star, Vega, T_eff=9490K
-    # avg of polar and equatorial temps, https://en.wikipedia.org/wiki/Vega
-    # # Get median Teff in field
-    Teff = 9400 * u.K # this is the BB temp needed to get the Tycho V Vega zero-point flux.
-    # Get a normalized spectral flux density curve for that Teff
-    model_curve = get_model_flux_density(Teff)(lambd)
-    # Scale our "SED" to give the same average spectral flux density as Vega over the V filter
-    avg_I_lambd = np.trapezoid(model_curve * tycho_v.tau(lambd), lambd) / np.trapezoid(tycho_v.tau(lambd), lambd)
-    norm = F0 / avg_I_lambd
-    rescaled_curve = model_curve * norm
-    # The average flux density of our new curve in our arbitrary filter is our zero-point flux density
-    F0_new = np.trapezoid(rescaled_curve * filter.tau(lambd), lambd) / np.trapezoid(filter.tau(lambd), lambd)
-
-    # import matplotlib.pyplot as plt
-    # fig, ax = plt.subplots()
-    # ax.plot(lambd_dat, model_curve)
-    # ax.plot(lambd_dat, model_curve * tycho_v.tau(lambd_dat))
-
-    # fig, ax = plt.subplots()
-    # ax.plot(lambd, rescaled_curve)
-    # ax.plot(lambd, rescaled_curve * filter.tau(lambd))
-
-    return F0_new
-
-
 def get_zero_point_flux(lambd, filter: Filter):
     '''
     To generate a zero-point flux, observe a 0mag star (Vega) in the given
     filter.
     Following the SVO routine,
     F0 = \int(T(\lambda) Vega(\lambda) d\lambda) / \int(T(\lambda) d\lambda)
+
+    Parameters
+    ----------
+    lambd : astropy.Quantity, length
+        Wavelength coordinate(s) for lookup
+    filter: Filter
+
+    Returns
+    -------
+    Filter zero-point flux, in W cm^-2 um^-1
     '''
     vega = SourceSpectrum.from_vega()
     spec_vega = vega(lambd.to(u.AA), flux_unit=units.FLAM)
@@ -330,34 +618,6 @@ def get_zero_point_flux(lambd, filter: Filter):
     return F0
 
 
-def get_equivalent_mag_old(lambd, ref_mag, ref_resp, new_resp, model_flux_density):
-    '''
-    Parameters
-    ----------
-    lambd : np.ndarray
-        Increasing array of wavelengths to evaluate curves at
-    ref_mag : float
-        magnitude in reference filter system
-    ref_resp : function
-        Evaluatable over lambd, the total response function of the optical system with the reference filter installed
-    new_resp : function
-        Evaluatable over lambd, the total response function of the optical system with the new filter installed
-    model_flux_density : function
-        Evaluatable over lambd, the flux density model for the star in question, in or convertible to W/cm^2/um
-    '''
-    # https://adsabs.harvard.edu/full/1996BaltA...5..459S
-    # assume suborbital platform: no atmospheric extinction
-    # assume LOS out of galactic plane: negligible reddening/dust extinction
-    numer = np.trapezoid(model_flux_density(lambd) * new_resp(lambd), lambd).to(u.W / u.cm**2)
-    denom = np.trapezoid(model_flux_density(lambd) * ref_resp(lambd), lambd).to(u.W / u.cm**2)
-    const = 2.5 * np.log(
-        np.trapezoid(new_resp(lambd), lambd) /
-        np.trapezoid(ref_resp(lambd), lambd)
-    )
-    new_mag = -2.5 * np.log(numer / denom) + const + ref_mag
-    return new_mag
-
-
 def get_equivalent_mag(lambd, ref_mag, ref_filt, new_filt, model_flux_density):
     '''
     Use synthetic photometry to calculate the magnitude of a star in one filter
@@ -365,7 +625,7 @@ def get_equivalent_mag(lambd, ref_mag, ref_filt, new_filt, model_flux_density):
 
     Parameters
     ----------
-    lambd : np.ndarray
+    lambd : astropy.Quantity
         Increasing array of wavelengths to evaluate curves at
     ref_mag : float or np.ndarray
         magnitude in reference filter system
@@ -376,6 +636,10 @@ def get_equivalent_mag(lambd, ref_mag, ref_filt, new_filt, model_flux_density):
     model_flux_density : function
         Evaluatable over lambd, the flux density model for the star in question,
         in or convertible to W/cm^2/um.
+
+    Returns
+    -------
+    magnitude in new filter system (VEGA magnitudes)
     '''
     def core(lambd, ref_mag, ref_filt, new_filt, model_flux_density):
         '''
@@ -416,6 +680,7 @@ def get_equivalent_mag(lambd, ref_mag, ref_filt, new_filt, model_flux_density):
         counts_src_new = obs_src_new.countrate(A)
         return -2.5 * np.log10(counts_src_new / counts_vega_new)
 
+    # Handle user passing an array of magnitudes
     if np.isscalar(ref_mag):
         return core(lambd, ref_mag, ref_filt, new_filt, model_flux_density)
     else:
@@ -442,12 +707,12 @@ def electrons_per_sec_spectral(tau, eta, A_tel, lambd, flux):
         mirror reflectivity, coatings, filters.
     eta : float
         The quantum efficiency of the detector.
-    A_tel : float
+    A_tel : astropy.Quantity, area
         The unobscured area of the telescope, in meters squared.
-    lambd : float
+    lambd : astropy.Quantity, length
         The wavelength array being integrated over, in meters
-    flux
-        The absolute flux in W / (cm^2 um)
+    flux : astropy.Quantity
+        The absolute flux in W cm^-2 um^-1
 
     Returns
     -------
@@ -470,10 +735,10 @@ def simple_snr_spectral(
     '''
     Parameters
     ----------
-    t : float
-        Exposure time, seconds
-    lambd : np.ndarray
-        Array of wavelengths to evaluate wavelength-dependent quantities at
+    t : astropy.Quantity, time
+        Exposure time
+    lambd : astropy.Quantity, length
+        Wavelength(s) to evaluate wavelength-dependent quantities at
     target_mag : float
         magnitude of target in filter for which the zero point flux is given
     starcam: StarCamera
@@ -484,18 +749,33 @@ def simple_snr_spectral(
         because a star that falls at the corner of a pixel will have its light
         spread evenly across a 4 pixel area. This also helps account for
         possible scattering, motion blur, and defocus.
-    altitude : astropy.Quantity, length
-        Scale the sky irradiance spectrum according to Alexander+1999
-    sky_brightness_factor : float
+    sky_brightness_factor : float (optional)
         Multiply the spectrum of the sky by this factor to explore different sun-relative pointings/altitudes.
         A factor of 0.263 and altitude 37 km reproduces the background counts measured by the TIM SC2 during Fort Sumner 2024.
-        A factor of 0.146 and altitude 38 km reproduces the background counts measured by the TIMcam piggyback during Fort Sumner 2025.
+        A factor of 0.351 and altitude 37.8 km reproduces the background counts measured by the TIMcam piggyback during Fort Sumner 2025.
         A factor of 1 and altitude 35 km reproduces the spectrum from Alexander+1999 Fig.4 MODTRAN.
+    altitude : astropy.Quantity, length (optional)
+        Scale the sky irradiance spectrum according to Alexander+1999
+    return_components : bool (optional)
+        If supplied, return components of the SNR calculation and flags for
+        saturation due to star, sky, or sky + star.
 
     Returns
     -------
     float
         Signal-to-noise ratio in a single exposure
+    source_electrons_per_sec : astropy.Quantity, e-/s (optional)
+        Total e-/s in aperture due to source
+    sky_electrons_per_sec : astropy.Quantity, e-/s (optional)
+        Total e-/s in aperture due to sky
+    aperture_area_px : astropy.Quantity, pix^2 (optional)
+        Number of pixels contributing to source and sky counts
+    warned_source_sat : bool (optional)
+        Sensor saturation is expected due to star counts alone
+    warned_sky_sat : bool (optional)
+        Sensor saturation is expected due to star counts alone
+    warned_sum_sat : bool (optional)
+        Sensor saturation is expected due to sum of star and sky counts
     '''
     lambd = lambd.to(u.nm)
     D = starcam.sensor.dark_current
