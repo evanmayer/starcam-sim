@@ -10,6 +10,8 @@ This is a powerful tool for trade studies, where combining simple models of the 
 
 I first presented this package at the Scientific Ballooning Technologies Conference at the University of Minnesota in 2025.
 
+![Plate-solving Potential](sc_potential.png)
+
 ## Assumptions
 
 ### Stellar Modeling
@@ -20,19 +22,18 @@ I first presented this package at the Scientific Ballooning Technologies Confere
     * astrometry.net is based on Tycho-2 but supplementary catalogs are available.
 * Stars are well-approximated by blackbodies of a given effective temperature (T_eff)
 * The magnitude limits in a given FoV are well-approximated by assuming all stars have the median T_eff of stars in the FoV
-    * This is a simplifying assumption, and predictive performance would improve if each star's T_eff were used
+    * This generally holds for magnitude limits in terms of Gaia $G_{RP}$ magnitudes and deep red filters, for which color differences of field stars track closely in $G_{RP}$ and red filters.
 
 ### Atmosphere Modeling
 
 * Atmospheric emission is smooth
     * Does not account for emission or absorption lines
 * Absolute value of emission spectrum is approximate
-    * Variations in altitude or sun-relative angle not accounted for, except to take the worst-case values from Alexander+ 1999 MODTRAN model for a suborbital flight ~35 km
 
 ### Instrument Modeling
 
 * Photographic lenses are not diffraction-limited
-    * The degree to which the PSF is degraded varies. As a first-order approximation, for the SNR calculation of background counts, we multiply the diffraction-limited PSF by a factor of 13, which forces the PSF to agree with the measured value for a well-corrected lens, a Sigma 85mm f/1.4 DG HSM ART.
+    * The degree to which the PSF is degraded varies. As a first-order approximation, for the SNR calculation of background counts, we multiply the diffraction-limited PSF by a factor of 10, which forces the PSF to agree with the measured value for a well-corrected lens, a Sigma 85mm f/1.4 DG HSM ART.
 * Sensor noise is dominated by sky background noise
     * We use the best publically available values for read noise and dark current, and incorporate them into the SNR calculations.
     * We assume the impact of inaccurate dark current or read noise figures is negligible, and so the results are valid even if accurate dark current or read noise figures are unavailable.
